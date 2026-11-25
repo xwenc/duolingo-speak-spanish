@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { navigateRoute, parseRoute, usePageHash } from './utils/router';
 import { createRequestId } from './utils/requestId';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { api, submitAttempt, fetchCatalog, type LearningCatalog, type Stats } from './services/api';
+import { api, submitAttempt, fetchCatalog, type LearningCatalog, type ChapterProgress, type Stats } from './services/api';
 import { AuthGate } from './components/AuthGate';
 import { ResetPracticeModal } from './components/ResetPracticeModal';
 import { Exercise, EvaluationResult } from './types';
@@ -23,10 +24,13 @@ import { CompletionCelebration } from './components/CompletionCelebration';
 import { OwlMood } from './components/DuoOwl';
 
 import { getBooks, type BooksProgressMap, type BookProgress } from './data/books';
+import { ChapterList } from './components/ChapterList';
 import { BooksLibrary } from './components/BooksLibrary';
+import { ReportPage } from './components/ReportPage';
 import { AdminDashboard } from './components/AdminDashboard';
 
 export default function App() {
+  const pageHash = usePageHash();
   const [catalog, setCatalog] = useState<LearningCatalog>({ books: [], chapters: [], exercises: [] });
   const exercises = catalog.exercises;
   const [authenticated, setAuthenticated] = useState(false);
@@ -42,7 +46,9 @@ export default function App() {
   const [gems, setGems] = useState(0);
   const [starredIds, setStarredIds] = useState<string[]>([]);
   const [attemptId, setAttemptId] = useState<string>(() => createRequestId());
+  const [chapterProgress, setChapterProgress] = useState<Record<string, ChapterProgress>>({});
   const applyStats = (stats: Stats) => {
+    setChapterProgress(stats.chapterProgress || {});
     setCanResetData(Boolean(stats.canResetData));
     setHearts(stats.hearts); setStreak(stats.streak); setXp(stats.xp);
     setGems(stats.gems); setStarredIds(stats.starredIds);
@@ -87,7 +93,7 @@ export default function App() {
   const [isHeartRestockOpen, setIsHeartRestockOpen] = useState<boolean>(false);
   const [isUnitSelectorOpen, setIsUnitSelectorOpen] = useState<boolean>(false);
 
-  const [currentView, setCurrentView] = useState<'books' | 'practice' | 'admin'>('books');
+  const [currentView, setCurrentView] = useState<'books' | 'chapters' | 'practice' | 'admin' | 'report'>('books');
   const [currentBookId, setCurrentBookId] = useState('');
   const [booksProgress, setBooksProgress] = useState<BooksProgressMap>({});
   const books = useMemo(() => getBooks(catalog), [catalog]);
@@ -106,6 +112,7 @@ export default function App() {
     setBooksProgress(previous => ({ ...previous, [currentBookId]: snapshot() }));
     setIsDifficultiesModalOpen(false); setIsUnitSelectorOpen(false); setIsHeartRestockOpen(false);
     setCurrentView('books');
+    navigateRoute('/');
   };
   const selectBook = (id: string) => {
     setAutoReadExerciseId(null);
@@ -121,8 +128,31 @@ export default function App() {
       setSessionXpGained(saved.sessionXpGained); setSessionGemsGained(saved.sessionGemsGained);
       if (saved.isCompleted) handleRestart();
     } else { setSelectedUnitId('all'); setIsStarredMode(false); handleRestart(); }
-    setCurrentView('practice');
+    setCurrentView('chapters');
+    navigateRoute(`/practice/${encodeURIComponent(id)}`);
   };
+
+  // Apply deep links only after authentication and the catalog are available.
+  useEffect(() => {
+    if (loading || !authenticated) return;
+    const route = parseRoute(pageHash);
+    TTSService.stop(); sttService.cancel();
+    setAutoReadExerciseId(null);
+    setIsDifficultiesModalOpen(false); setIsUnitSelectorOpen(false); setIsHeartRestockOpen(false);
+    if (currentView === 'practice' && (route.view !== 'practice' || route.bookId !== currentBookId)) {
+      setBooksProgress(previous => ({ ...previous, [currentBookId]: snapshot() }));
+    }
+    if (route.view === 'practice' && books.some(book => book.id === route.bookId && book.exercises.length)) {
+      if (currentBookId !== route.bookId || (currentView !== 'practice' && currentView !== 'chapters')) selectBook(route.bookId);
+    } else if (route.view === 'report') {
+      setCurrentView('report');
+    } else if (route.view === 'admin' && canResetData) {
+      setCurrentView('admin');
+    } else {
+      setCurrentView('books');
+      navigateRoute('/', true);
+    }
+  }, [pageHash, loading, authenticated, canResetData, books]);
 
   // 3. 计算当前激活的题目池
   const activeExercises: Exercise[] = useMemo(() => {
@@ -138,6 +168,12 @@ export default function App() {
   }, [isStarredMode, selectedUnitId, starredIds, bookExercises]);
 
   const currentExercise = activeExercises[currentIndex] || activeExercises[0] || exercises[0];
+  const currentUnitIndex = currentBook?.chapters.findIndex(chapter => chapter.id === selectedUnitId) ?? -1;
+  const nextUnit = !isStarredMode && currentUnitIndex >= 0
+    ? currentBook?.chapters.slice(currentUnitIndex + 1).find(chapter =>
+        bookExercises.some(exercise => exercise.unitId === chapter.id))
+    : undefined;
+
 
   useEffect(() => {
     let lastTTSError = '';
@@ -196,11 +232,11 @@ export default function App() {
     setEvaluationResult(null);
     setAttemptId(createRequestId());
     setIsCompleted(false);
+    setCurrentView('practice');
   };
 
   const check = async (transcript: string) => {
     if (attemptPending.current || busy || status !== 'unanswered') return;
-    if (hearts <= 0) { setIsHeartRestockOpen(true); return; }
     attemptPending.current = true;
     setBusy(true); setError('');
     try {
@@ -211,8 +247,7 @@ export default function App() {
       applyStats(stats); setEvaluationResult(evaluation);
       setStatus(evaluation.isPassed ? 'correct' : 'incorrect');
       if (evaluation.isPassed) { soundEffects.playCorrectSound(); }
-      else { soundEffects.playIncorrectSound(); setHeartLostPulse(true); setTimeout(() => setHeartLostPulse(false), 500); }
-      if (!stats.hearts) setIsHeartRestockOpen(true);
+      else { soundEffects.playIncorrectSound(); }
     } catch (err) { setError((err as Error).message); }
     finally { attemptPending.current = false; setBusy(false); }
   };
@@ -265,7 +300,7 @@ export default function App() {
         method: 'POST', body: JSON.stringify({ password, confirmed: true }),
       });
       applyStats(result.stats); setCatalog(await fetchCatalog());
-      setBooksProgress({}); setCurrentBookId(''); setCurrentView('books');
+      setBooksProgress({}); setCurrentBookId(''); setCurrentView('books'); navigateRoute('/');
       setSelectedUnitId('all'); setIsStarredMode(false); handleRestart();
       setIsDifficultiesModalOpen(false); setIsHeartRestockOpen(false); setIsUnitSelectorOpen(false);
       setResetOpen(false); setNotice('练习数据已清空，已载入最新题库，可以重新开始。');
@@ -293,17 +328,17 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#f7f7f7] text-[#4b4b4b] flex flex-col font-['Nunito',sans-serif]">
-      <div className="px-4 pt-2 flex justify-between text-sm"><span>经验值 {xp}</span><div className='flex items-center justify-end'>{canResetData && <div className="px-4 flex justify-end gap-4"><button disabled={busy || currentView === 'admin'} className="text-sm font-bold text-sky-600 hover:underline disabled:opacity-50" onClick={() => { if (currentView === 'practice') openBooks(); TTSService.stop(); sttService.cancel(); setCurrentView('admin'); }}>管理后台</button><button disabled={busy} className="text-xs text-red-600 underline" onClick={() => { TTSService.stop(); sttService.cancel(); setResetOpen(true); }}>重置练习数据</button></div>}<button disabled={busy} onClick={async () => { try { await api('/logout', { method: 'POST' }); setAuthenticated(false); setBooksProgress({}); setCurrentBookId(''); setCurrentView('books'); handleRestart(); } catch (err) { setError((err as Error).message); } }}>退出登录</button></div></div>
+      <div className="px-4 pt-2 flex justify-between text-sm"><span>经验值 {xp}</span><div className='flex items-center justify-end gap-4'><button disabled={busy || currentView === 'report'} className="font-bold text-[#58a700] disabled:opacity-50" onClick={() => navigateRoute('/report')}>学习报告</button>{canResetData && <div className="px-4 flex justify-end gap-4"><button disabled={busy || currentView === 'admin'} className="text-sm font-bold text-sky-600 hover:underline disabled:opacity-50" onClick={() => { if (currentView === 'practice') openBooks(); TTSService.stop(); sttService.cancel(); setCurrentView('admin'); navigateRoute('/admin'); }}>管理后台</button><button disabled={busy} className="text-xs text-red-600 underline" onClick={() => { TTSService.stop(); sttService.cancel(); setResetOpen(true); }}>重置练习数据</button></div>}<button disabled={busy} onClick={async () => { try { await api('/logout', { method: 'POST' }); setAuthenticated(false); setBooksProgress({}); setCurrentBookId(''); setCurrentView('books'); navigateRoute('/'); handleRestart(); } catch (err) { setError((err as Error).message); } }}>退出登录</button></div></div>
       {resetOpen && <ResetPracticeModal busy={busy} onClose={() => setResetOpen(false)} onReset={handleResetData} />}
       {notice && <p role="status" className="px-4 text-green-700">{notice}</p>}
       {error && <p role="alert" className="p-3 text-red-600">{error}</p>}
       {busy && <div role="status" className="fixed inset-0 z-[100] bg-white/60 flex items-center justify-center" aria-live="polite">正在保存…</div>}
-      {currentView === 'admin' && canResetData ? <AdminDashboard onExit={async changed => {
+      {currentView === 'report' ? <ReportPage onBack={openBooks} /> : currentView === 'admin' && canResetData ? <AdminDashboard onExit={async changed => {
         const [nextCatalog, stats] = await Promise.all([fetchCatalog(), api<Stats>('/me')]);
         setCatalog(nextCatalog); applyStats(stats);
         if (changed) { setBooksProgress({}); setCurrentBookId(''); setSelectedUnitId('all'); setIsStarredMode(false); handleRestart(); }
-        setCurrentView('books');
-      }} /> : currentView === 'books' ? <BooksLibrary books={books} progress={booksProgress} currentBookId={currentBookId} starredIds={starredIds} onSelectBook={selectBook} /> : <>
+        setCurrentView('books'); navigateRoute('/');
+      }} /> : currentView === 'books' ? <BooksLibrary books={books} progress={booksProgress} currentBookId={currentBookId} starredIds={starredIds} onSelectBook={selectBook} /> : currentView === 'chapters' && currentBook ? <ChapterList progress={chapterProgress} book={currentBook} onBack={openBooks} onSelectChapter={handleSelectUnit} /> : <>
         {/* Duolingo Sticky Top Header */}
         <Header
           currentIndex={currentIndex}
@@ -319,12 +354,18 @@ export default function App() {
           onToggleMute={handleToggleMute}
           onOpenDifficultiesModal={() => setIsDifficultiesModalOpen(true)}
           onOpenUnitSelector={() => setIsUnitSelectorOpen(true)}
-          onExitPractice={openBooks}
+          onExitPractice={() => {
+            if (busy) return;
+            TTSService.stop(); sttService.cancel();
+            setAutoReadExerciseId(null);
+            setBooksProgress(previous => ({ ...previous, [currentBookId]: snapshot() }));
+            setCurrentView('chapters');
+          }}
           heartLostPulse={heartLostPulse}
         />
 
         {/* Main Practice Stage */}
-        <main className="flex-1 w-full max-w-2xl mx-auto px-4 pt-3 pb-32 flex flex-col items-center justify-start">
+        <main className={`flex-1 w-full ${isCompleted ? 'max-w-2xl' : 'max-w-7xl'} mx-auto px-4 pt-3 pb-32 flex flex-col items-center justify-start`}>
           {isCompleted ? (
             /* Completion Screen */
             <CompletionCelebration
@@ -333,6 +374,8 @@ export default function App() {
               gemsEarned={sessionGemsGained}
               streak={streak}
               starredCount={starredExercises.length}
+              nextUnitName={nextUnit?.name}
+              onNextUnit={nextUnit ? () => handleSelectUnit(nextUnit.id) : undefined}
               onRestart={handleRestart}
               onPracticeStarred={handleStartStarredPractice}
               onOpenUnitSelector={() => setIsUnitSelectorOpen(true)}
@@ -353,8 +396,11 @@ export default function App() {
                 </div>
               )}
 
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8 items-start">
+              <section aria-label="练习题目" className="min-w-0">
               {/* Question Card */}
               <QuestionCard
+                shortcutsEnabled={!resetOpen && !isDifficultiesModalOpen && !isHeartRestockOpen && !isUnitSelectorOpen}
                 exercise={currentExercise}
                 autoRead={autoReadExerciseId === currentExercise.id}
                 isStarred={starredIds.includes(currentExercise.id)}
@@ -362,6 +408,8 @@ export default function App() {
                 owlMood={owlMood}
               />
 
+              </section>
+              <section aria-label="作答与评估" className="min-w-0 lg:sticky lg:top-24">
               {/* Word-by-Word Diff View if checked */}
               {evaluationResult && status !== 'unanswered' ? (
                 <WordDiffView
@@ -381,6 +429,8 @@ export default function App() {
                   disabled={busy || status !== 'unanswered'}
                 />
               )}
+              </section>
+              </div>
             </div>
           )}
         </main>

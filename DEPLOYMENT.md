@@ -23,7 +23,7 @@ docker compose --profile setup run --build --rm init
 docker compose up -d --build --remove-orphans api web
 ```
 
-访问 http://localhost:3000。API 通过 `http://host.docker.internal:8001` 访问原生服务；本机直接运行 API 时默认使用 `http://127.0.0.1:8001`。可用 `SPEECH_URL` 覆盖。Docker Desktop 应能访问宿主机回环端口；若当前网络模式不支持，可设置 `SPEECH_HOST=0.0.0.0` 启动并用防火墙限制到 Docker 网络。原生服务无用户鉴权，不应暴露到公网。
+访问 http://localhost:3000。API 通过 `http://host.docker.internal:8001` 访问原生服务；本机直接运行 API 时默认使用 `http://127.0.0.1:8001`。Docker 地址可用 `DOCKER_SPEECH_URL` 覆盖；宿主机直接运行 API 使用 `SPEECH_URL`。Compose 不读取终端中的 `SPEECH_URL`，避免本地开发的回环地址误传入容器。原有 Docker `.env` 如配置了 `SPEECH_URL`，请改名为 `DOCKER_SPEECH_URL`。Docker Desktop 应能访问宿主机回环端口；若当前网络模式不支持，可设置 `SPEECH_HOST=0.0.0.0` 启动并用防火墙限制到 Docker 网络。原生服务无用户鉴权，不应暴露到公网。
 
 `TTS_MODEL` 默认 `mlx-community/Ming-3.0-tts-0.5B-bf16`，`TTS_VOICE` 默认留空（模型默认音色），可设为 Ming 内置音色如 `UK_Charlotte`，TTS 使用 `lang_code=es`；`STT_MODEL` 默认 `small`，使用 faster-whisper / CTranslate2 的 CPU int8 推理，固定西语转写并启用 VAD。可通过启动脚本的环境变量使用其他兼容模型或本地路径。不要增加 worker：模型常驻内存，TTS/STT 共用推理锁，繁忙返回503。实际速度和内存占用取决于 Mac 型号，尚不提供加速倍数保证。
 

@@ -54,11 +54,16 @@ def test_attempt_idempotency_rewards_and_hearts(client):
     for _ in range(5):
         r = c.post('/api/attempts', json={**body, 'requestId':str(uuid4()), 'transcript':''})
         assert r.status_code == 200
-    assert r.json()['stats']['hearts'] == 0
-    assert c.post('/api/attempts', json={**body, 'requestId':str(uuid4())}).status_code == 409
-    assert c.post('/api/hearts/refill').status_code == 409
+    assert r.json()['stats']['hearts'] == 5
+    with factory.begin() as db:
+        db.scalar(select(User)).hearts = 0
+    assert c.post('/api/attempts', json={**body, 'requestId':str(uuid4())}).status_code == 200
+    refilled = c.post('/api/hearts/refill')
+    assert refilled.status_code == 200
+    assert refilled.json()['hearts'] == 5
+    assert refilled.json()['gems'] == 2
     with factory() as db:
-        assert len(list(db.scalars(select(Attempt)))) == 7
+        assert len(list(db.scalars(select(Attempt)))) == 8
 
 def test_stars_isolated_and_persisted(client):
     c, _ = client
@@ -122,7 +127,7 @@ def test_local_tts_auth_validation_and_audio(client):
     with patch('app.main.httpx.post', return_value=httpx.Response(503)), patch('app.main.asyncio.sleep'):
         assert c.get('/api/tts', params={'text':'Hola'}).headers['retry-after'] == '2'
 
-def test_failed_answers_automatically_star_without_duplicates(client):
+def test_answers_only_preserve_manually_added_stars(client):
     from app.db import Star
     c, factory = client
     register(c)
@@ -130,12 +135,15 @@ def test_failed_answers_automatically_star_without_duplicates(client):
     failed = c.post('/api/attempts', json=body)
     assert failed.status_code == 200
     assert not failed.json()['evaluation']['isPassed']
-    assert failed.json()['stats']['starredIds'] == ['one']
-    assert c.post('/api/attempts', json=body).json()['stats']['hearts'] == 4
-    assert c.post('/api/attempts', json={**body, 'requestId':str(uuid4())}).json()['stats']['starredIds'] == ['one']
+    assert failed.json()['stats']['starredIds'] == []
+    assert c.post('/api/attempts', json=body).json()['stats']['hearts'] == 5
+    assert c.post('/api/attempts', json={**body, 'requestId':str(uuid4())}).json()['stats']['starredIds'] == []
     with factory() as db:
-        assert len(list(db.scalars(select(Star)))) == 1
-    assert c.get('/api/me').json()['starredIds'] == ['one']
+        assert len(list(db.scalars(select(Star)))) == 0
+    assert c.get('/api/me').json()['starredIds'] == []
+    assert c.put('/api/stars/one?enabled=true').json()['starredIds'] == ['one']
+    failed_again = c.post('/api/attempts', json={**body, 'requestId':str(uuid4())})
+    assert failed_again.json()['stats']['starredIds'] == ['one']
     passed = c.post('/api/attempts', json={**body, 'requestId':str(uuid4()), 'transcript':'Hola amigo'})
     assert passed.json()['stats']['starredIds'] == ['one']
     assert c.put('/api/stars/one?enabled=false').json()['starredIds'] == []
@@ -183,7 +191,75 @@ def test_reset_invalid_seed_keeps_existing_data(client, monkeypatch):
     c.post('/api/attempts', json={'requestId':str(uuid4()),'exerciseId':'one','transcript':'adiós'})
     with patch('app.main.load_book', side_effect=ValueError('invalid')):
         assert c.post('/api/admin/reset-practice', json={'password':'long-test-password','confirmed':True}).status_code == 503
-    assert c.get('/api/me').json()['hearts'] == 4
+    assert c.get('/api/me').json()['hearts'] == 5
     with factory() as db:
         assert db.get(Exercise,'one') is not None
         assert len(list(db.scalars(select(Attempt)))) == 1
+
+
+def test_chapter_progress_uses_latest_scores_and_is_account_scoped(client):
+    from app.db import Book, Chapter
+    from datetime import datetime
+    c, factory = client
+    register(c)
+    with factory.begin() as db:
+        user = db.scalar(select(User))
+        db.add(Book(id='book', name='Book'))
+        db.flush()
+        db.add(Chapter(id='chapter', book_id='book', name='Chapter'))
+        db.flush()
+        db.get(Exercise, 'one').chapter_id = 'chapter'
+        db.add(Exercise(id='two', chapter_id='chapter', data={'spanish': 'Hola'}))
+        for exercise_id, score, day in [('one', 10, 1), ('one', 80, 2), ('two', 100, 3)]:
+            db.add(Attempt(user_id=user.id, exercise_id=exercise_id, request_id=str(uuid4()),
+                           result={'score': score}, created_at=datetime(2026, 1, day)))
+    expected = {'chapter': {'averageScore': 90, 'practicedCount': 2, 'lastPracticedAt': '2026-01-03T00:00:00Z'}}
+    assert c.get('/api/me').json()['chapterProgress'] == expected
+    assert c.get('/api/me').json()['chapterProgress'] == expected
+    c.post('/api/logout')
+    register(c, 'other@example.com')
+    assert c.get('/api/me').json()['chapterProgress'] == {}
+
+
+def test_daily_report_timezone_gaps_accuracy_and_isolation(client):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    c, factory = client
+    assert c.get('/api/report').status_code == 401
+    register(c)
+    today = datetime.now(ZoneInfo('Europe/Madrid')).date()
+    with factory.begin() as db:
+        user = db.scalar(select(User))
+        other = User(email='report-other@example.com', password='unused')
+        db.add(other)
+        db.flush()
+        # 23:30 UTC on the preceding day belongs to today in Madrid.
+        from datetime import timedelta, time
+        timestamp = datetime.combine(today - timedelta(days=1), time(23, 30))
+        for owner, score in [(user.id, 100), (user.id, 50), (other.id, 0)]:
+            db.add(Attempt(user_id=owner, exercise_id='one', request_id=str(uuid4()),
+                           result={'score': score}, created_at=timestamp))
+    response = c.get('/api/report?days=7&timezone=Europe%2FMadrid')
+    assert response.status_code == 200
+    report = response.json()
+    assert len(report['daily']) == 7
+    assert report['daily'][-1] == {'date': today.isoformat(), 'count': 2, 'accuracy': 75.0}
+    assert report['daily'][0]['count'] == 0
+    assert report['daily'][0]['accuracy'] is None
+    assert report['total'] == 2
+    assert report['accuracy'] == 75.0
+    assert report['activeDays'] == 1
+    for query in ['days=0', 'days=91', 'timezone=bad-zone']:
+        assert c.get('/api/report?' + query).status_code == 422
+
+
+def test_daily_report_empty_and_idempotent_submissions(client):
+    c, _ = client
+    register(c)
+    empty = c.get('/api/report').json()
+    assert empty['total'] == 0
+    assert empty['accuracy'] is None
+    body = {'requestId': str(uuid4()), 'exerciseId': 'one', 'transcript': 'Hola amigo'}
+    assert c.post('/api/attempts', json=body).status_code == 200
+    assert c.post('/api/attempts', json=body).status_code == 200
+    assert c.get('/api/report').json()['total'] == 1

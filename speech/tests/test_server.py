@@ -6,6 +6,22 @@ from fastapi import HTTPException
 from speech import server
 
 
+def test_ming_config_loads_without_model_type_warning(tmp_path, caplog):
+    import json
+    from transformers import AutoConfig
+
+    (tmp_path / 'config.json').write_text(json.dumps({
+        'model_type': 'dense',
+        'llm_config': {'model_type': 'qwen2', 'hidden_size': 896},
+    }))
+    server.register_ming_config()
+    server.register_ming_config()  # Worker reloads must be safe.
+    config = AutoConfig.from_pretrained(tmp_path, local_files_only=True)
+    assert config.model_type == 'dense'
+    assert config.llm_config['hidden_size'] == 896
+    assert 'instantiate a model of type' not in caplog.text
+
+
 def wav(seconds):
     output = io.BytesIO()
     with wave.open(output, 'wb') as f:

@@ -37,6 +37,8 @@ app = FastAPI(title='Spanish Practice API', lifespan=lifespan)
 app.include_router(catalog_router)
 app.include_router(learning_router)
 app.include_router(covers_router)
+from .reports import router as reports_router
+app.include_router(reports_router)
 
 @app.middleware('http')
 async def origin_guard(request: Request, call_next):
@@ -53,7 +55,22 @@ async def origin_guard(request: Request, call_next):
     return response
 
 def stats(user, db):
-    return dict(hearts=user.hearts, xp=user.xp, gems=user.gems, streak=user.streak, canResetData=can_reset(user),
+    # Use each sentence's latest score, so retries replace its previous result.
+    chapters = {}
+    seen = set()
+    rows = db.execute(select(Attempt, Exercise.chapter_id).join(Exercise, Attempt.exercise_id == Exercise.id)
+                      .where(Attempt.user_id == user.id, Exercise.chapter_id.is_not(None))
+                      .order_by(Attempt.created_at.desc(), Attempt.id.desc()))
+    for attempt, chapter_id in rows:
+        if attempt.exercise_id in seen:
+            continue
+        seen.add(attempt.exercise_id)
+        entry = chapters.setdefault(chapter_id, {'scores': [], 'lastPracticedAt': attempt.created_at.isoformat() + 'Z'})
+        entry['scores'].append(attempt.result['score'])
+    progress = {chapter_id: {'averageScore': int(sum(entry['scores']) / len(entry['scores']) + 0.5),
+                             'practicedCount': len(entry['scores']), 'lastPracticedAt': entry['lastPracticedAt']}
+                for chapter_id, entry in chapters.items()}
+    return dict(chapterProgress=progress, hearts=user.hearts, xp=user.xp, gems=user.gems, streak=user.streak, canResetData=can_reset(user),
                 starredIds=list(db.scalars(select(Star.exercise_id).where(Star.user_id == user.id))))
 class Credentials(BaseModel):
     email: str = Field(min_length=3, max_length=254, pattern=r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
@@ -140,18 +157,12 @@ def submit(body: Submission, user=Depends(current_user), db=Depends(get_db)):
     exercise = db.get(Exercise, body.exerciseId)
     if not exercise:
         raise HTTPException(404, '题目不存在')
-    if user.hearts <= 0:
-        raise HTTPException(409, '红心不足，请兑换红心')
     result = evaluate(exercise.data['spanish'], body.transcript)
     # Reward only the first successful completion of each exercise.
     already_passed = any(a.result['isPassed'] for a in db.scalars(select(Attempt).where(Attempt.user_id == user.id, Attempt.exercise_id == body.exerciseId)))
     if result['isPassed'] and not already_passed:
         user.xp += 15
         user.gems += 2
-    elif not result['isPassed']:
-        user.hearts -= 1
-        if db.get(Star, (user.id, body.exerciseId)) is None:
-            db.add(Star(user_id=user.id, exercise_id=body.exerciseId))
     today = date.today()
     if user.last_practice != today.isoformat():
         user.streak = user.streak + 1 if user.last_practice == (today-timedelta(days=1)).isoformat() else 1
@@ -163,12 +174,7 @@ def submit(body: Submission, user=Depends(current_user), db=Depends(get_db)):
 @app.post('/api/hearts/refill')
 def refill(user=Depends(current_user), db=Depends(get_db)):
     user = db.scalar(select(User).where(User.id == user.id).with_for_update().execution_options(populate_existing=True))
-    latest = db.scalar(select(Attempt).where(Attempt.user_id == user.id).order_by(Attempt.created_at.desc()).limit(1))
-    free = latest is not None and latest.created_at <= datetime.utcnow() - timedelta(minutes=30)
-    if user.hearts == 5 or (user.gems < 10 and not free):
-        raise HTTPException(409, '需要10颗宝石，或最后一次练习后休息30分钟')
-    if not free:
-        user.gems -= 10
+    # Consumption is paused: refilling is free and practice has no heart gate.
     user.hearts = 5
     db.commit()
     return stats(user, db)

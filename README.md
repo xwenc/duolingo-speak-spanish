@@ -85,10 +85,10 @@ cp .env.example .env
 ```dotenv
 APP_ORIGIN=http://localhost:3000
 COOKIE_SECURE=false
-SPEECH_URL=http://host.docker.internal:8001
+DOCKER_SPEECH_URL=http://host.docker.internal:8001
 ```
 
-`.env` 由 Docker Compose 读取，不会自动加载到原生语音启动脚本。
+`.env` 由 Docker Compose 读取，不会自动加载到原生语音启动脚本。Docker 使用 `DOCKER_SPEECH_URL`，本机直接运行 API 使用 `SPEECH_URL`，两者互不覆盖。已有 Docker `.env` 中若设置了 `SPEECH_URL`，请改名为 `DOCKER_SPEECH_URL`。
 
 ### 2. 安装并启动原生语音服务
 
@@ -143,7 +143,8 @@ docker compose down
 | `APP_ORIGIN` | 主访问地址，默认 `http://localhost:3000`，校验写请求来源 |
 | `APP_ORIGINS` | 额外允许的访问地址，逗号分隔，精确匹配协议、主机及端口 |
 | `COOKIE_SECURE` | 示例配置为 `false`；HTTPS 部署应设为 `true` |
-| `SPEECH_URL` | Compose 默认 `http://host.docker.internal:8001`；宿主机直接运行 API 时默认 `http://127.0.0.1:8001` |
+| `DOCKER_SPEECH_URL` | Docker 专用，默认 `http://host.docker.internal:8001`，不受终端导出的 `SPEECH_URL` 影响 |
+| `SPEECH_URL` | 仅宿主机直接运行 API 时配置，默认 `http://127.0.0.1:8001` |
 | `ADMIN_EMAIL` | 管理员登录邮箱；API 启动时自动创建，拥有清空练习数据权限 |
 | `ADMIN_PASSWORD` | 管理员密码，12–128 位；仅保存在服务端环境变量，数据库保存哈希 |
 
@@ -378,19 +379,19 @@ docker compose up -d --build api web
 
 ### 一键导出书籍
 
-在管理后台的书籍卡片点击“一键导出”，下载 UTF-8 JSON 文件。导出包含书籍名称、描述、全部章节（含空章节）、句子、拼读、语法提示、难度及生词数组；不包含封面图片文件或封面地址，也不包含账户、收藏、答题记录。接口为 `GET /api/admin/books/{book_id}/export`，仅管理员可用。导出内容以数据库中已保存的数据为准，文件包含格式名和版本号，便于识别。
+在管理后台的书籍卡片点击“一键导出”，下载 UTF-8 JSON 文件。导出包含书籍名称、描述、全部章节（含空章节）、句子、拼读、语法提示、难度及生词数组；包含封面与句子图片：已上传图片以 Base64 嵌入 `images` 字段，同图去重；外链图片保留原地址，不下载外部文件。不包含账户、收藏、答题记录。接口为 `GET /api/admin/books/{book_id}/export`，仅管理员可用。导出内容以数据库中已保存的数据为准，文件包含格式名和版本号，便于识别。
 
 ### 一键导入书籍
 
-点击管理后台顶部“一键导入”，选择之前导出的 `habla-espanol-book` 版本 1 JSON 文件（UTF-8，最大 5 MB）。导入书籍、章节（保留空章节）、句子、难度、拼读、语法提示和生词，成功后显示章节与句子数量并刷新书籍库。
+点击管理后台顶部“一键导入”，选择之前导出的 `habla-espanol-book` 版本 1 JSON 文件（UTF-8，含图片最大 100 MB，单张图片最大 5 MB）。导入书籍、章节（保留空章节）、句子、难度、拼读、语法提示和生词，成功后显示章节与句子数量并刷新书籍库。
 
-导入总是创建独立副本并重新分配 ID，不覆盖已有书籍，也不导入图片、收藏或答题记录。整份文件先校验，再在单个事务内保存；校验失败不会留下部分书籍。每本书最多 1000 个章节、10000 个句子。接口为 `POST /api/admin/books/import`（multipart 字段 `file`），仅管理员可用。
+导入总是创建独立副本并重新分配 ID，不覆盖已有书籍，同时批量恢复附件图片并更新图片地址，不导入收藏或答题记录。兼容没有图片附件的旧版 JSON。整份文件先校验，再在单个事务内保存；校验失败不会留下部分书籍。每本书最多 1000 个章节、10000 个句子。接口为 `POST /api/admin/books/import`（multipart 字段 `file`），仅管理员可用。
 
 ### 可选句子图片
 
 句子表单支持“上传句子图片”（JPG、PNG、WebP，最大 5 MB），上传后可预览、更换或移除，点击“保存”后生效。无图片时正常保存和练习；有图片时在后台句子卡片和练习题上方显示，练习端加载失败时隐藏图片区域。
 
-句子 API 使用可选 `imageUrl` 字段，省略时更新会保留原图，传空字符串则移除。`POST /api/admin/sentence-images` 复用封面的验证与持久存储，返回图片地址。无需数据库迁移。书籍导出依然不包含图片文件或图片地址；导入不恢复图片，seed 更新保留已有句子图片。
+句子 API 使用可选 `imageUrl` 字段，省略时更新会保留原图，传空字符串则移除。`POST /api/admin/sentence-images` 复用封面的验证与持久存储，返回图片地址。无需数据库迁移。书籍一键导出包含已上传图片附件和图片地址，一键导入可批量恢复；seed 更新保留已有句子图片。
 
 ### 为章节批量导入句子
 

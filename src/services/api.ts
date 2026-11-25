@@ -1,5 +1,6 @@
 import type { EvaluationResult, Exercise } from '../types';
-export interface Stats { canResetData?: boolean; hearts: number; xp: number; gems: number; streak: number; starredIds: string[] }
+export interface ChapterProgress { averageScore: number; practicedCount: number; lastPracticedAt: string }
+export interface Stats { chapterProgress?: Record<string, ChapterProgress>; canResetData?: boolean; hearts: number; xp: number; gems: number; streak: number; starredIds: string[] }
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api${path}`, { credentials: 'same-origin', ...init,
     headers: { ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...init.headers } });

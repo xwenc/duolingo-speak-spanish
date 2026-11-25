@@ -28,7 +28,7 @@ def test_export_import_round_trip_and_repeat_creates_independent_copies(client, 
         assert result['sentenceCount'] == 1
         imported = result['book']
         assert imported['id'] != book['id']
-        assert imported['thumbnail'] == ''
+        assert imported['thumbnail'] == original['book']['thumbnail']
         copied = c.get(f"/api/admin/books/{imported['id']}/export").json()['book']
         assert copied['name'] == original['book']['name']
         assert {item['name'] for item in copied['chapters']} == {chapter['name'], empty['name']}
@@ -54,6 +54,7 @@ def test_invalid_book_is_rejected_before_any_writes(client, monkeypatch):
     assert upload(c, invalid).status_code == 422
     assert upload(c, {**original, 'version': 2}).status_code == 422
     assert c.post('/api/admin/books/import', files={'file': ('bad.json', b'{invalid', 'application/json')}).status_code == 400
+    monkeypatch.setattr('app.catalog.MAX_IMPORT_BYTES', 5 * 1024 * 1024)
     assert c.post('/api/admin/books/import', files={'file': ('big.json', b'x' * (5 * 1024 * 1024 + 1), 'application/json')}).status_code == 413
     with factory() as db:
         assert db.scalar(select(func.count()).select_from(Book)) == 1
@@ -89,3 +90,59 @@ def test_import_authorization_and_empty_book(client, monkeypatch):
     result = upload(c, payload)
     assert result.status_code == 201
     assert result.json()['chapterCount'] == result.json()['sentenceCount'] == 0
+
+
+def test_images_portable_round_trip_and_invalid_cleanup(client, monkeypatch, tmp_path):
+    import io
+    import base64
+    from PIL import Image
+    monkeypatch.setenv('UPLOAD_DIR', str(tmp_path))
+    c, factory = client
+    admin(c, monkeypatch)
+    book, chapter, sentence = create_tree(c)
+    image = io.BytesIO()
+    Image.new('RGB', (16, 16), 'red').save(image, format='PNG')
+    url = c.post('/api/admin/covers', files={'file': ('cover.png', image.getvalue(), 'image/png')}).json()['url']
+    c.put(f"/api/admin/books/{book['id']}", json= {'name': book['name'], 'description': book['description'], 'thumbnail': url})
+    from test_catalog import SENTENCE
+    c.put(f"/api/admin/sentences/{sentence['id']}", json={**SENTENCE, 'imageUrl': url})
+    original = c.get(f"/api/admin/books/{book['id']}/export").json()
+    assert list(original['images']) == [url]  # Shared images stored once.
+    assert base64.b64decode(original['images'][url])
+    # Import must work without the source image or its original server.
+    (tmp_path / url.rsplit('/', 1)[1]).unlink()
+    result = upload(c, original)
+    assert result.status_code == 201, result.text
+    new_url = result.json()['book']['thumbnail']
+    assert new_url != url
+    assert c.get(new_url).status_code == 200
+    copied = c.get(f"/api/admin/books/{result.json()['book']['id']}/export").json()
+    assert copied['book']['chapters'][0]['sentences'][0]['imageUrl'] == new_url
+    before = set(tmp_path.iterdir())
+    broken = deepcopy(original)
+    broken['images'][url] = base64.b64encode(b'not an image').decode()
+    assert upload(c, broken).status_code == 400
+    assert set(tmp_path.iterdir()) == before
+    broken['images'] = {'../../outside': 'abc'}
+    assert upload(c, broken).status_code == 422
+    broken['images'] = {url: 'invalid base64!'}
+    assert upload(c, broken).status_code == 422
+    def fail(*args, **kwargs):
+        raise RuntimeError('database write failed')
+    monkeypatch.setattr('app.catalog.exercise_data', fail)
+    with pytest.raises(RuntimeError, match='database write failed'):
+        upload(c, original)
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_old_json_without_images_still_imports(client, monkeypatch):
+    c, _ = client
+    admin(c, monkeypatch)
+    book, _, _ = create_tree(c)
+    payload = c.get(f"/api/admin/books/{book['id']}/export").json()
+    payload.pop('images')
+    payload['book'].pop('thumbnail')
+    for chapter in payload['book']['chapters']:
+        for sentence in chapter['sentences']:
+            sentence.pop('imageUrl')
+    assert upload(c, payload).status_code == 201

@@ -8,6 +8,7 @@ from pydantic import ValidationError, RootModel, Field, BaseModel, ConfigDict
 from sqlalchemy import select, delete, func
 from .book_format import BookInput, ChapterInput, SentenceInput, BookImport, ImportSentence, exercise_data
 from .auth import current_user, require_admin
+from .book_images import export_images, import_images, cleanup_images, MAX_IMPORT_BYTES
 from .ordering import next_book_order
 from .db import get_db, Book, Chapter, Exercise, Star, Attempt
 
@@ -190,14 +191,13 @@ def export_book(book_id: str, db=Depends(get_db)):
     grouped = {}
     for exercise in exercises:
         sentence = sentence_data(exercise)
-        sentence.pop('imageUrl', None)
         grouped.setdefault(exercise.chapter_id, []).append({**sentence, 'difficulty': exercise.data.get('difficulty', 'easy')})
     payload = {
         'format': 'habla-espanol-book',
         'version': 1,
         'exportedAt': datetime.now(timezone.utc).isoformat(),
         'book': {
-            'id': book.id, 'name': book.name, 'description': book.description,
+            'id': book.id, 'name': book.name, 'description': book.description, 'thumbnail': book.thumbnail,
             'chapters': [
                 {'id': chapter.id, 'name': chapter.name, 'description': chapter.description, 'icon': chapter.icon,
                  'sentences': grouped.get(chapter.id, [])}
@@ -205,7 +205,11 @@ def export_book(book_id: str, db=Depends(get_db)):
             ],
         },
     }
-    return Response(json.dumps(payload, ensure_ascii=False, indent=2), media_type='application/json', headers={
+    payload['images'] = export_images([book.thumbnail] + [sentence.get('imageUrl', '') for sentences in grouped.values() for sentence in sentences])
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2)
+    if len(encoded.encode('utf-8')) > MAX_IMPORT_BYTES:
+        raise HTTPException(413, '含图片的书籍文件不能超过 100 MB')
+    return Response(encoded, media_type='application/json', headers={
         'Content-Disposition': f"attachment; filename=book-{book.id}.json; filename*=UTF-8''{quote(book.name, safe='')}.json",
     })
 
@@ -213,9 +217,9 @@ def export_book(book_id: str, db=Depends(get_db)):
 @router.post('/books/import', status_code=201)
 def import_book(file: UploadFile, db=Depends(get_db)):
     try:
-        raw = file.file.read(5 * 1024 * 1024 + 1)
-        if len(raw) > 5 * 1024 * 1024:
-            raise HTTPException(413, '书籍 JSON 文件不能超过 5 MB')
+        raw = file.file.read(MAX_IMPORT_BYTES + 1)
+        if len(raw) > MAX_IMPORT_BYTES:
+            raise HTTPException(413, '书籍 JSON 文件不能超过 100 MB')
         try:
             payload = json.loads(raw.decode('utf-8-sig'))
         except (ValueError, UnicodeDecodeError, RecursionError):
@@ -227,19 +231,22 @@ def import_book(file: UploadFile, db=Depends(get_db)):
         count = sum(len(chapter.sentences) for chapter in validated.book.chapters)
         # All validation precedes writes. A single transaction creates a fresh copy.
         source = validated.book
+        references = {source.thumbnail} | {sentence.imageUrl for chapter in source.chapters for sentence in chapter.sentences}
+        stored = import_images(validated.images, references)
         try:
-            book = Book(id=str(uuid4()), sort_order=next_book_order(db), name=source.name, description=source.description, thumbnail='')
+            book = Book(id=str(uuid4()), sort_order=next_book_order(db), name=source.name, description=source.description, thumbnail=stored.get(source.thumbnail, source.thumbnail))
             db.add(book); db.flush()
             for chapter_position, source_chapter in enumerate(source.chapters):
                 chapter = Chapter(id=str(uuid4()), book_id=book.id, sort_order=chapter_position, name=source_chapter.name, description=source_chapter.description, icon=source_chapter.icon)
                 db.add(chapter); db.flush()
                 for position, source_sentence in enumerate(source_chapter.sentences):
                     id = str(uuid4())
-                    data = {'id': id, **exercise_data(source_sentence, chapter), 'difficulty': source_sentence.difficulty, 'imageUrl': ''}
+                    data = {'id': id, **exercise_data(source_sentence, chapter), 'difficulty': source_sentence.difficulty, 'imageUrl': stored.get(source_sentence.imageUrl, source_sentence.imageUrl)}
                     db.add(Exercise(id=id, chapter_id=chapter.id, sort_order=position, data=data))
             db.commit()
         except Exception:
             db.rollback()
+            cleanup_images(stored)
             raise
         return {'book': book_data(book, len(source.chapters)), 'chapterCount': len(source.chapters), 'sentenceCount': count}
     finally:

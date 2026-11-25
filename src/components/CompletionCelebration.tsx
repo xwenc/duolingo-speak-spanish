@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect } from 'react';
-import { Sparkles, Flame, Gem, Trophy, RotateCcw, Star, Layers } from 'lucide-react';
+import { Sparkles, Flame, Gem, Trophy, RotateCcw, Star, Layers, ArrowRight } from 'lucide-react';
 import { getAverageAccuracy } from '../utils/sessionAccuracy';
 import { DuoOwl } from './DuoOwl';
 import { soundEffects } from '../services/soundEffects';
@@ -15,6 +15,8 @@ interface CompletionCelebrationProps {
   gemsEarned: number;
   streak: number;
   starredCount: number;
+  nextUnitName?: string;
+  onNextUnit?: () => void;
   onRestart: () => void;
   onPracticeStarred: () => void;
   onOpenUnitSelector: () => void;
@@ -26,6 +28,8 @@ export const CompletionCelebration: React.FC<CompletionCelebrationProps> = ({
   gemsEarned,
   streak,
   starredCount,
+  nextUnitName,
+  onNextUnit,
   onRestart,
   onPracticeStarred,
   onOpenUnitSelector,
@@ -89,6 +93,18 @@ export const CompletionCelebration: React.FC<CompletionCelebrationProps> = ({
 
       {/* Action Buttons */}
       <div className="w-full flex flex-col gap-3">
+        {onNextUnit && (
+          <button
+            onClick={() => {
+              soundEffects.playClickSound();
+              onNextUnit();
+            }}
+            className="duo-btn-green w-full py-3.5 px-4 rounded-2xl font-black text-sm flex flex-col items-center justify-center gap-1 shadow-xs cursor-pointer"
+          >
+            <span className="flex items-center gap-2">下一个单元 <ArrowRight className="w-4 h-4 stroke-[3]" /></span>
+            {nextUnitName && <span className="text-xs font-bold">{nextUnitName}</span>}
+          </button>
+        )}
         {/* Option 1: Restart current pool */}
         <button
           onClick={() => {

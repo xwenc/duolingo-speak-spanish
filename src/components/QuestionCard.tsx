@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Volume2, Star, ChevronDown, ChevronUp, Sparkles, BookOpen } from 'lucide-react';
 import { Exercise } from '../types';
 import { DuoOwl, OwlMood } from './DuoOwl';
@@ -13,6 +13,7 @@ import { soundEffects } from '../services/soundEffects';
 interface QuestionCardProps {
   exercise: Exercise;
   autoRead?: boolean;
+  shortcutsEnabled?: boolean;
   isStarred: boolean;
   onToggleStar: (id: string) => void;
   owlMood: OwlMood;
@@ -21,15 +22,34 @@ interface QuestionCardProps {
 export const QuestionCard: React.FC<QuestionCardProps> = ({
   exercise,
   autoRead = false,
+  shortcutsEnabled = true,
   isStarred,
   onToggleStar,
   owlMood,
 }) => {
   const [isPlayingTTS, setIsPlayingTTS] = useState<boolean>(false);
   const [playingRate, setPlayingRate] = useState<number | null>(null);
-  const [showGrammarTip, setShowGrammarTip] = useState<boolean>(false);
+  const [showGrammarTip, setShowGrammarTip] = useState<boolean>(true);
   const [activeHintIndex, setActiveHintIndex] = useState<number | null>(null);
   const [failedImage, setFailedImage] = useState('');
+  const normalPlayRef = useRef<HTMLButtonElement>(null);
+  const slowPlayRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!shortcutsEnabled || event.defaultPrevented || event.repeat || event.isComposing ||
+          event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]')) return;
+      const key = event.key.toLowerCase();
+      const button = key === 's' ? normalPlayRef.current : key === 'l' ? slowPlayRef.current : null;
+      if (!button || button.disabled) return;
+      event.preventDefault();
+      button.click();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [shortcutsEnabled]);
 
   useEffect(() => {
     setIsPlayingTTS(false); setPlayingRate(null);
@@ -60,7 +80,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   };
 
   return (
-    <div className="w-full max-w-xl mx-auto flex flex-col gap-3">
+    <div className="w-full max-w-xl lg:max-w-none mx-auto flex flex-col gap-3">
       {/* Title / Category line */}
       <div className="flex items-center justify-between text-xs font-bold text-slate-500 px-1">
         <div className="flex items-center gap-1.5">
@@ -111,9 +131,12 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
             <div className="flex flex-col gap-1.5 shrink-0 pt-0.5">
               {/* Normal Speed 1.0x */}
               <button
+                ref={normalPlayRef}
+                aria-label="正常播放（快捷键 S）"
+                aria-keyshortcuts="S"
                 onClick={() => handlePlayTTS(1.0)}
                 disabled={isPlayingTTS && playingRate === 1.0}
-                title="原速朗读 (1.0x)"
+                title="原速朗读 (1.0x) · 快捷键 S"
                 className="w-10 h-10 rounded-2xl bg-[#1cb0f6] hover:bg-[#20bdff] border-b-3 border-[#1899d6] flex items-center justify-center text-white active:translate-y-0.5 transition-all shadow-xs"
               >
                 <Volume2 className="w-5 h-5" />
@@ -121,9 +144,12 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
               {/* Turtle Slow Speed 0.6x */}
               <button
+                ref={slowPlayRef}
+                aria-label="慢速播放（快捷键 L）"
+                aria-keyshortcuts="L"
                 onClick={() => handlePlayTTS(0.6)}
                 disabled={isPlayingTTS && playingRate === 0.6}
-                title="乌龟慢速朗读 (0.6x)"
+                title="乌龟慢速朗读 (0.6x) · 快捷键 L"
                 className="w-10 h-10 rounded-2xl bg-[#ff9600] hover:bg-[#ffa726] border-b-3 border-[#e08400] flex items-center justify-center text-white active:translate-y-0.5 transition-all shadow-xs text-lg select-none"
               >
                 🐢

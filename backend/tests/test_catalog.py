@@ -112,7 +112,7 @@ def test_learner_catalog_reflects_admin_changes_and_empty_content(client, monkey
     assert not any(item.get('bookId') == empty['id'] for item in catalog['exercises'])
 
 
-def test_export_book_contains_full_hierarchy_without_cover_or_other_books(client, monkeypatch):
+def test_export_book_contains_full_hierarchy_with_cover_without_other_books(client, monkeypatch):
     import json
     c, _ = client
     admin(c, monkeypatch)
@@ -137,8 +137,8 @@ def test_export_book_contains_full_hierarchy_without_cover_or_other_books(client
     assert all(exported_sentence[key] == value for key, value in SENTENCE.items())
     assert next(item for item in exported['chapters'] if item['id'] == empty_chapter['id'])['sentences'] == []
     encoded = json.dumps(payload, ensure_ascii=False)
-    assert 'thumbnail' not in encoded
-    assert BOOK['thumbnail'] not in encoded
+    assert exported['thumbnail'] == BOOK['thumbnail']
+    assert payload['images'] == {}
     assert other_book['id'] not in encoded
     assert other_sentence['id'] not in encoded
     assert c.get('/api/admin/books/missing/export').status_code == 404

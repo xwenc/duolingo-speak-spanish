@@ -60,7 +60,7 @@ class ImportChapter(ChapterInput):
     sentences: list[ImportSentence] = Field(max_length=10000)
 
 
-class ImportBook(CatalogInput):
+class ImportBook(BookInput):
     id: str | None = Field(default=None, min_length=1, max_length=64)
     description: str = Field(default='', max_length=5000)
     chapters: list[ImportChapter] = Field(max_length=1000)
@@ -71,6 +71,7 @@ class BookImport(BaseModel):
     format: Literal['habla-espanol-book']
     version: Literal[1]
     exportedAt: str | None = None
+    images: dict[str, str] = Field(default_factory=dict, max_length=10001)
     book: ImportBook
 
     @model_validator(mode='after')

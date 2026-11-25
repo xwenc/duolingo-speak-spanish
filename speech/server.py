@@ -25,11 +25,27 @@ cache_lock = threading.Lock()
 CACHE_BYTES = 8 * 1024 * 1024
 
 
+def register_ming_config():
+    """Describe Ming metadata for AutoTokenizer; MLX still loads the weights."""
+    from transformers import AutoConfig, PreTrainedConfig
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    if 'dense' not in CONFIG_MAPPING:
+        class MingConfig(PreTrainedConfig):
+            model_type = 'dense'
+
+        # Ming's top-level type is not a Transformers model architecture. Without
+        # this metadata adapter AutoTokenizer falls back to the untyped base
+        # config and warns about dense -> ''. Keep the checkpoint untouched.
+        AutoConfig.register('dense', MingConfig)
+
+
 def load():
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise RuntimeError('Native macOS Apple Silicon is required; do not run this worker in Docker')
     from mlx_audio.tts.utils import load_model as load_tts
     from faster_whisper import WhisperModel
+    register_ming_config()
     models['tts'] = load_tts(TTS_MODEL)
     models['stt'] = WhisperModel(STT_MODEL, device='cpu', compute_type='int8',
                                  download_root=os.path.join(os.getenv('HF_HOME', '.local-test/huggingface'), 'faster-whisper'))
